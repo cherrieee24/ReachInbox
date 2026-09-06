@@ -59,6 +59,11 @@ COPY --from=frontend /app/frontend/dist /app/frontend/dist
 ENV SERVE_FRONTEND=true
 ENV FRONTEND_DIST_PATH=../frontend/dist
 
+# Applies migrations, then starts the server. Render's pre-deploy command is a
+# paid-plan feature, so the release step has to live inside the container.
+COPY docker-start.sh /app/backend/docker-start.sh
+RUN chmod +x /app/backend/docker-start.sh
+
 EXPOSE 4000
 ENTRYPOINT ["dumb-init", "--"]
-CMD ["node", "dist/server.js"]
+CMD ["./docker-start.sh"]

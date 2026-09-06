@@ -48,9 +48,10 @@ services:
     dockerfilePath: ./Dockerfile
     dockerContext: .
     healthCheckPath: /api/health
-    # Runs before the new instance receives traffic, so the schema is always
-    # migrated ahead of the code that depends on it.
-    preDeployCommand: npx prisma migrate deploy
+    # No preDeployCommand: it is a paid-plan feature, so on a free instance it
+    # would never run and the app would boot against a schema that does not
+    # exist. docker-start.sh applies migrations before starting the server
+    # instead, which works on every plan.
     envVars:
       - key: NODE_ENV
         value: production

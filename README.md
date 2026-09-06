@@ -450,6 +450,11 @@ Render prompts for the values marked `sync: false` — the Google credentials an
 your admin email. Everything else, including `JWT_SECRET` and `ENCRYPTION_KEY`,
 is generated or wired automatically. **No secret is committed.**
 
+Migrations run inside the container at startup (`docker-start.sh`) rather than
+as a Render pre-deploy command — pre-deploy is a paid-plan feature, so on a free
+instance it never runs and the app would boot against a schema that does not
+exist.
+
 After the first deploy, register the callback in the Google console verbatim:
 
 ```
@@ -718,6 +723,7 @@ second account's email is unreachable from this session.
 │       ├── types/              shared contracts
 │       └── test/               Vitest setup and render helpers
 ├── Dockerfile                  single-service image (API + SPA), used by Render
+├── docker-start.sh             migrate, then start — the container's release step
 ├── render.yaml                 Render blueprint (free tier)
 ├── docker/                     docker-compose.yml (development, unauthenticated)
 │                               docker-compose.prod.yml (production shape)
