@@ -1,10 +1,22 @@
 # ReachInbox Email Scheduler
 
 **Live demo: https://reachinbox-3qcm.onrender.com**
-> Hosted on Render's free tier, which spins the instance down when idle — the
-> first request can take **50 seconds or more** while it wakes. Subsequent
-> requests are fast. Mail goes to Ethereal, a capture-only sandbox, so nothing
-> is ever delivered to a real inbox.
+> Hosted on Render's free tier. Two caveats:
+>
+> 1. The instance spins down when idle, so the **first request can take 50
+>    seconds or more** while it wakes. Subsequent requests are fast.
+> 2. **Sending does not complete on this host.** Render's free plan blocks
+>    outbound traffic on ports 25, 465 and 587 — *"Free web services can't send
+>    outbound network traffic on ports 25, 465, or 587, commonly used for
+>    SMTP"* — and Ethereal's SMTP is on 587. Campaigns schedule, jobs are
+>    queued and picked up, the worker claims each row, and the send then fails
+>    on a blocked socket and retries. Everything except the final SMTP hop is
+>    exercised.
+>
+> **Run it locally to see delivery end to end** — the [Local Development](#how-to-run-the-backend)
+> steps take about five minutes and the full pipeline works, with real Ethereal
+> preview links for every message. Mail always goes to Ethereal, a capture-only
+> sandbox, so nothing reaches a real inbox in either environment.
 
 Schedule an email campaign to a list of recipients, have it delivered reliably
 at the right time and at a controlled pace, and see exactly what happened.
