@@ -90,6 +90,16 @@ worker as **fire-and-forget** side effects — neither can delay or fail a send.
 Job payloads carry only ids. No subject, body or recipient address is ever
 stored in Redis.
 
+The four mechanisms behind that diagram each get their own section below:
+
+| How it works | Section |
+| --- | --- |
+| Scheduling — BullMQ delayed jobs, and why no cron | [Scheduling Architecture](#scheduling-architecture) |
+| Persistence across a restart | [Persistence](#persistence) |
+| Not sending the same email twice | [Idempotency](#idempotency) |
+| Rate limiting — minimum delay and hourly ceiling | [Rate Limiting](#rate-limiting) |
+| Worker concurrency | [Concurrency](#concurrency) |
+
 ---
 
 ## Scheduling Architecture
@@ -414,11 +424,60 @@ npm run docker:up     # start infrastructure
 | Health | http://localhost:4000/api/health |
 | Queue dashboard | http://localhost:4000/admin/queues |
 
-Before signing in you need Google OAuth credentials: create a **Web application**
-OAuth client at https://console.cloud.google.com/apis/credentials, add
-`http://localhost:4000/api/auth/google/callback` under *Authorised redirect
-URIs*, and put the client ID and secret in `backend/.env` along with a
-`JWT_SECRET`.
+### Google OAuth
+
+Sign-in is real Google OAuth — there is no mock login — so the server needs its
+own credentials before you can get past `/login`:
+
+1. Create a **Web application** OAuth client at
+   https://console.cloud.google.com/apis/credentials
+2. Under *Authorised redirect URIs* add, verbatim:
+   `http://localhost:4000/api/auth/google/callback`
+3. Put the client ID and secret in `backend/.env` as `GOOGLE_CLIENT_ID` and
+   `GOOGLE_CLIENT_SECRET`
+4. Generate a session signing key: `openssl rand -base64 48` → `JWT_SECRET`
+
+The client secret never reaches the browser: the code-for-token exchange
+happens server-side and the session comes back as an httpOnly cookie.
+
+### Ethereal Email
+
+Ethereal is the **only** transport this project uses. It is a capture-only
+sandbox — it accepts a message, renders it on a preview page, and never
+delivers to a real inbox. There is no production SMTP path, which is what makes
+the 1000-recipient load test safe to run.
+
+**You do not have to configure anything.** Leave `ETHEREAL_USER` and
+`ETHEREAL_PASSWORD` blank and the app provisions a throwaway account the first
+time it sends:
+
+```
+INFO  Provisioned a throwaway Ethereal account user=hnnjlk57mkshraz4@ethereal.email
+```
+
+The trade-off is that the account changes on every restart, so yesterday's
+preview links stop resolving.
+
+**To keep one inbox across restarts** — worth doing before a demo:
+
+1. Go to https://ethereal.email/create
+2. Click **Create Ethereal Account**. No signup, no email confirmation
+3. Copy the generated **Username** and **Password** into `backend/.env`:
+
+```ini
+ETHEREAL_USER=your-generated-user@ethereal.email
+ETHEREAL_PASSWORD=your-generated-password
+```
+
+4. Restart the backend. Every message now lands in that one mailbox, readable at
+   https://ethereal.email/messages after logging in with those credentials
+
+`ETHEREAL_HOST`, `ETHEREAL_PORT` and `ETHEREAL_SECURE` already default to
+`smtp.ethereal.email`, `587` and `false` — leave them alone.
+
+Each successful send stores its `providerMessageId` and a `previewUrl`. The
+preview link is returned by `GET /api/emails/:id` and rendered as **View
+message** in the Sent table, so you can open the delivered mail from the UI.
 
 ---
 
