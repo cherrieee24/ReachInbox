@@ -1,0 +1,132 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+#
+# One web service that serves both the API and the SPA, plus managed Postgres
+# and Key Value (Redis). Deploy with: New → Blueprint → point at this repo.
+#
+# Why a single service rather than the api/worker split in
+# docker/docker-compose.prod.yml:
+#
+#   * Render has no free background worker, so the send worker runs inside the
+#     web service (WORKER_ENABLED=true). The architecture supports either shape;
+#     on a paid plan, split it out as a `type: worker` service running
+#     `node dist/workers/index.js` and set WORKER_ENABLED=false here.
+#   * Serving the SPA from the same origin keeps the session cookie first-party,
+#     so SameSite=Lax works. onrender.com is on the Public Suffix List, so two
+#     subdomains of it are different *sites* — a split deployment would need
+#     COOKIE_SAMESITE=none.
+#
+# Free-tier behaviour worth knowing before you demo:
+#
+#   * The service sleeps after 15 minutes without traffic and takes ~1 minute to
+#     wake. While it sleeps nothing sends; due jobs run once it wakes, because
+#     PostgreSQL — not the queue — is the source of truth.
+#   * Free Key Value is in-memory only, so a restart loses the delayed jobs.
+#     Boot-time reconciliation re-enqueues everything still pending in Postgres,
+#     which is exactly the case it was written for.
+#   * Render offers no Elasticsearch. ELASTICSEARCH_NODE is left unset, the
+#     circuit breaker stays open, and search falls back to a Postgres query.
+#   * Free Postgres expires 30 days after creation.
+
+databases:
+  - name: reachinbox-postgres
+    plan: free
+    databaseName: reachinbox
+    user: reachinbox
+
+services:
+  - name: reachinbox-cache
+    type: keyvalue
+    plan: free
+    # In-memory only on the free plan; the value is documented, not chosen.
+    maxmemoryPolicy: noeviction
+    ipAllowList: []   # empty = reachable only from inside Render
+
+  - name: reachinbox
+    type: web
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    # Runs before the new instance receives traffic, so the schema is always
+    # migrated ahead of the code that depends on it.
+    preDeployCommand: npx prisma migrate deploy
+    envVars:
+      - key: NODE_ENV
+        value: production
+
+      - key: DATABASE_URL
+        fromDatabase:
+          name: reachinbox-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: reachinbox-cache
+          type: keyvalue
+          property: connectionString
+
+      # No free background worker, so the worker runs in this process.
+      - key: WORKER_ENABLED
+        value: 'true'
+      - key: WORKER_CONCURRENCY
+        value: '3'
+
+      # Same origin, so both point at this service's own URL.
+      - key: FRONTEND_URL
+        fromService:
+          name: reachinbox
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL
+      - key: CORS_ORIGIN
+        fromService:
+          name: reachinbox
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL
+      - key: COOKIE_SAMESITE
+        value: lax
+
+      # Generated once by Render and then held stable. Rotating ENCRYPTION_KEY
+      # invalidates stored Slack connections.
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ENCRYPTION_KEY
+        generateValue: true
+
+      # sync: false means Render prompts for these at deploy time and keeps them
+      # out of this file. Nothing secret is ever committed.
+      #
+      # GOOGLE_CALLBACK_URL must be registered verbatim in the Google console as
+      #   https://<your-service>.onrender.com/api/auth/google/callback
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_CALLBACK_URL
+        sync: false
+
+      # Optional. Leave unset and Slack simply reports "not configured" —
+      # rate-limit alerts are best-effort and never block a send.
+      - key: SLACK_CLIENT_ID
+        sync: false
+      - key: SLACK_CLIENT_SECRET
+        sync: false
+      - key: SLACK_REDIRECT_URI
+        sync: false
+
+      # Optional. Blank provisions a throwaway Ethereal inbox on each boot; set
+      # them from https://ethereal.email/create to keep one across restarts.
+      - key: ETHEREAL_USER
+        sync: false
+      - key: ETHEREAL_PASSWORD
+        sync: false
+
+      # Your Google address, to unlock /admin/queues after signing in.
+      - key: ADMIN_EMAILS
+        sync: false
+
+      - key: MIN_EMAIL_DELAY_MS
+        value: '1000'
+      - key: MAX_EMAILS_PER_HOUR
+        value: '100'
+      - key: LOG_LEVEL
+        value: info

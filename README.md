@@ -439,6 +439,41 @@ and the worker are separate services, and `prisma migrate deploy` runs as a
 one-shot `migrate` service that both of them wait on. Only the nginx `web`
 container publishes a port.
 
+### Render (one-click blueprint)
+
+`render.yaml` deploys the whole thing on Render's free tier: **New → Blueprint →
+point at this repo**. It provisions managed Postgres, Key Value (Redis) and one
+web service built from the root `Dockerfile`, which serves the API *and* the
+SPA on a single origin.
+
+Render prompts for the values marked `sync: false` — the Google credentials and
+your admin email. Everything else, including `JWT_SECRET` and `ENCRYPTION_KEY`,
+is generated or wired automatically. **No secret is committed.**
+
+After the first deploy, register the callback in the Google console verbatim:
+
+```
+https://<your-service>.onrender.com/api/auth/google/callback
+```
+
+and set `GOOGLE_CALLBACK_URL` to the same string.
+
+Four free-tier behaviours are worth knowing before you demo:
+
+| Behaviour | Consequence |
+| --- | --- |
+| Service sleeps after 15 min idle, ~1 min to wake | Nothing sends while asleep; due jobs run on wake, because Postgres is the source of truth |
+| Free Key Value is in-memory only | A restart loses the delayed jobs — boot-time reconciliation re-enqueues everything still pending |
+| No Elasticsearch on Render | `ELASTICSEARCH_NODE` stays unset and search falls back to Postgres |
+| Free Postgres expires after 30 days | Fine for a demo; upgrade for anything longer |
+
+The first two are not worked around, they are handled: the queue is a
+scheduling mechanism, never the record of what still needs to be sent.
+
+On a paid plan, split the worker into its own `type: worker` service running
+`node dist/workers/index.js` and set `WORKER_ENABLED=false` on the web service —
+the shape `docker/docker-compose.prod.yml` already uses.
+
 ### Images
 
 | Image | Build | Contents |
@@ -682,6 +717,8 @@ second account's email is unreachable from this session.
 │       ├── services/           typed API calls
 │       ├── types/              shared contracts
 │       └── test/               Vitest setup and render helpers
+├── Dockerfile                  single-service image (API + SPA), used by Render
+├── render.yaml                 Render blueprint (free tier)
 ├── docker/                     docker-compose.yml (development, unauthenticated)
 │                               docker-compose.prod.yml (production shape)
 ├── docs/                       ARCHITECTURE.md
