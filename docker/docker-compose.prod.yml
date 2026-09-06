@@ -1,0 +1,125 @@
+# Production-shaped stack: authenticated datastores, the API and the worker as
+# separate services, and migrations as a one-shot release step.
+#
+#   docker compose -f docker/docker-compose.prod.yml --env-file docker/.env.prod up -d --build
+#
+# Unlike the development compose, nothing here binds to the host by default —
+# only the reverse proxy is exposed. Managed Postgres/Redis/Elasticsearch are
+# the better choice in a real deployment; this file is the self-hosted shape.
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Unlike the dev stack, the password is mandatory here.
+    command: >
+      sh -c 'redis-server --appendonly yes --requirepass "$REDIS_PASSWORD"'
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ['CMD-SHELL', 'redis-cli -a "$REDIS_PASSWORD" ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      # Security stays ON here, unlike the development stack.
+      xpack.security.enabled: 'true'
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD:?set ELASTIC_PASSWORD}
+      ES_JAVA_OPTS: ${ES_JAVA_OPTS:--Xms1g -Xmx1g}
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test:
+        ['CMD-SHELL', 'curl -sf -u elastic:$ELASTIC_PASSWORD http://localhost:9200/_cluster/health || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  # One-shot release step. Runs to completion before api and worker start, so
+  # the schema is always migrated ahead of the code that depends on it.
+  migrate:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    command: ['npx', 'prisma', 'migrate', 'deploy']
+    restart: 'no'
+    env_file: [./.env.prod]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  api:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    # The worker runs as its own service below, so the API process serves HTTP
+    # only. A web restart then cannot drop sends that are mid-flight.
+    environment:
+      WORKER_ENABLED: 'false'
+    env_file: [./.env.prod]
+    expose: ['4000']
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ['CMD-SHELL', 'node -e "fetch(\"http://localhost:4000/api/health\").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  worker:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    command: ['node', 'dist/workers/index.js']
+    restart: unless-stopped
+    environment:
+      WORKER_ENABLED: 'true'
+    env_file: [./.env.prod]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    # Give in-flight sends time to finish before SIGKILL.
+    stop_grace_period: 30s
+    # Scale horizontally with:  docker compose ... up -d --scale worker=3
+    # Leases and the Redis throttle make that safe.
+
+  web:
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile
+      args:
+        # Same-origin: nginx proxies /api to the API service, so no CORS and
+        # no cross-site cookie problem.
+        VITE_API_URL: /api
+    restart: unless-stopped
+    ports:
+      - '${WEB_PORT:-8080}:80'
+    depends_on:
+      - api
+
+volumes:
+  postgres-data:
+  redis-data:
+  elasticsearch-data:

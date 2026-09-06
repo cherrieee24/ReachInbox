@@ -1,0 +1,47 @@
+# Dependencies
+node_modules/
+.pnp/
+.pnp.js
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.*
+!.env.example
+# .env.* above would otherwise swallow the production template too.
+!.env.prod.example
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Caches
+.cache/
+.vite/
+coverage/
+.eslintcache
+
+# Docker volumes / local data
+docker/data/
+*.pid
+
+# Prisma local artifacts
+backend/prisma/*.db
+backend/prisma/migrations/dev.db*
+# Prisma 7 generates its client into the source tree
+backend/src/generated/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json

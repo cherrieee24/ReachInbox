@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+  backend:
+    name: Backend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    # The backend suite is deliberately an integration suite: the guarantees it
+    # checks (leases, atomic throttling, index isolation) are enforced by these
+    # services, so faking them would only test the fakes.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: reachinbox
+          POSTGRES_PASSWORD: reachinbox
+          POSTGRES_DB: reachinbox
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U reachinbox"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+      elasticsearch:
+        image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+        env:
+          discovery.type: single-node
+          xpack.security.enabled: 'false'
+          ES_JAVA_OPTS: '-Xms512m -Xmx512m'
+        ports: ['9200:9200']
+        options: >-
+          --health-cmd "curl -sf http://localhost:9200/_cluster/health || exit 1"
+          --health-interval 15s --health-timeout 5s --health-retries 10
+
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://reachinbox:reachinbox@localhost:5432/reachinbox?schema=public
+      REDIS_URL: redis://localhost:6379
+      ELASTICSEARCH_NODE: http://localhost:9200
+      FRONTEND_URL: http://localhost:5173
+      CORS_ORIGIN: http://localhost:5173
+      # Throwaway values: CI never talks to Google, Slack or a real inbox.
+      JWT_SECRET: ci-jwt-secret-not-used-outside-ci
+      ENCRYPTION_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      ETHEREAL_HOST: smtp.ethereal.email
+      ETHEREAL_PORT: '587'
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      # The Prisma client is generated into the source tree and gitignored, so
+      # it must exist before typecheck or build.
+      - run: npx prisma generate
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npx prisma migrate deploy
+      - run: npm test
+      - run: npm run build
+
+  images:
+    name: Docker images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Proves both Dockerfiles still build; nothing is pushed.
+      - run: docker build -f backend/Dockerfile -t reachinbox-api:ci .
+      - run: docker build -f frontend/Dockerfile -t reachinbox-web:ci .

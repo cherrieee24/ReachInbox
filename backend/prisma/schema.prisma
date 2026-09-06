@@ -1,0 +1,275 @@
+// ReachInbox Email Scheduler — database schema.
+//
+// Queue mechanics (BullMQ) are deliberately absent: this models the durable
+// state only. The queue will be a projection of it, never the source of truth,
+// so a Redis flush loses throughput but never data.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+/// Lifecycle of a whole campaign.
+enum EmailJobStatus {
+  DRAFT
+  SCHEDULED
+  PROCESSING
+  PAUSED
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+/// Lifecycle of one recipient inside a campaign.
+enum RecipientStatus {
+  PENDING
+  SCHEDULED
+  PROCESSING
+  SENT
+  FAILED
+  CANCELLED
+}
+
+/// How a sender delivers mail. ETHEREAL is the development sink.
+enum SenderProvider {
+  SMTP
+  ETHEREAL
+  GMAIL
+}
+
+/// Authorization level. ADMIN unlocks the queue monitoring dashboard.
+enum UserRole {
+  MEMBER
+  ADMIN
+}
+
+enum SlackConnectionStatus {
+  ACTIVE
+  REVOKED
+  EXPIRED
+}
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+
+model User {
+  id        String   @id @default(cuid())
+  googleId  String   @unique @map("google_id")
+  name      String
+  email     String   @unique
+  avatar    String?
+  role      UserRole @default(MEMBER)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  senders          Sender[]
+  emailJobs        EmailJob[]
+  emailRecipients  EmailRecipient[]
+  slackConnections SlackConnection[]
+
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// Sending identities
+// ---------------------------------------------------------------------------
+
+/// An address a user can send from. A user may hold several.
+model Sender {
+  id       String         @id @default(cuid())
+  userId   String         @map("user_id")
+  /// Display name on the From header, e.g. "Aarav from ReachInbox".
+  name     String
+  fromEmail String        @map("from_email")
+  provider SenderProvider @default(SMTP)
+
+  // SMTP transport settings. Null for providers that authenticate by OAuth.
+  host     String?
+  port     Int?
+  secure   Boolean @default(false)
+  username String?
+  /// Encrypted at rest by the application — never a plaintext password.
+  password String? @map("password_encrypted")
+
+  /// Used when a job does not name a sender. Enforced one-per-user in code:
+  /// Prisma cannot express Postgres partial unique indexes.
+  isDefault  Boolean   @default(false) @map("is_default")
+  isVerified Boolean   @default(false) @map("is_verified")
+  verifiedAt DateTime? @map("verified_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  emailJobs EmailJob[]
+
+  /// One row per address per user; the same address may exist for other users.
+  @@unique([userId, fromEmail])
+  @@index([userId])
+  @@index([userId, isDefault])
+  @@map("senders")
+}
+
+// ---------------------------------------------------------------------------
+// Campaigns
+// ---------------------------------------------------------------------------
+
+model EmailJob {
+  id       String @id @default(cuid())
+  userId   String @map("user_id")
+  senderId String @map("sender_id")
+
+  subject String
+  body    String @db.Text
+
+  /// When the first email goes out. Stored UTC; rendered in the user's zone.
+  scheduledAt DateTime @map("scheduled_at")
+  /// Seconds to wait between consecutive sends.
+  delayBetweenEmails Int @default(30) @map("delay_between_emails")
+  /// Ceiling on sends per rolling hour, protecting sender reputation.
+  hourlyLimit Int @default(100) @map("hourly_limit")
+
+  status EmailJobStatus @default(DRAFT)
+
+  /// Request-level idempotency. Two POSTs carrying the same key resolve to
+  /// this one campaign instead of creating a second.
+  idempotencyKey String? @map("idempotency_key")
+
+  // Denormalised counters so a list view never aggregates over recipients.
+  totalRecipients Int @default(0) @map("total_recipients")
+  sentCount       Int @default(0) @map("sent_count")
+  failedCount     Int @default(0) @map("failed_count")
+
+  startedAt   DateTime? @map("started_at")
+  completedAt DateTime? @map("completed_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Restrict: a sender with delivery history must not vanish from the audit
+  /// trail. Detach or archive the sender instead.
+  sender Sender @relation(fields: [senderId], references: [id], onDelete: Restrict)
+
+  recipients EmailRecipient[]
+
+  /// The database itself refuses a duplicate campaign for the same key.
+  @@unique([userId, idempotencyKey])
+  /// "My campaigns, newest first", optionally filtered by status.
+  @@index([userId, status, createdAt])
+  /// The dispatcher's sweep: which jobs are due to start?
+  @@index([status, scheduledAt])
+  @@index([senderId])
+  @@map("email_jobs")
+}
+
+// ---------------------------------------------------------------------------
+// Individual sends
+// ---------------------------------------------------------------------------
+
+/// One row per address per campaign — the unit of work a worker will claim.
+model EmailRecipient {
+  id         String @id @default(cuid())
+  emailJobId String @map("email_job_id")
+  /// Denormalised from the parent job. Costs one column and buys user-scoped
+  /// history queries that never join, which is the hottest read in the app.
+  userId     String @map("user_id")
+
+  email String
+
+  /// Per-recipient send time, derived from the job's start, delay and limit.
+  scheduledAt DateTime  @map("scheduled_at")
+  sentAt      DateTime? @map("sent_at")
+
+  status       RecipientStatus @default(PENDING)
+  errorMessage String?         @map("error_message") @db.Text
+  attempts     Int             @default(0)
+
+  /// Message id returned by the SMTP provider on a successful send.
+  providerMessageId String? @map("provider_message_id")
+  /// Ethereal-only link to the captured message, for development and demos.
+  previewUrl        String? @map("preview_url")
+
+  /// Makes delivery exactly-once under retries: a duplicate job delivery finds
+  /// this key taken and stops rather than emailing the person twice.
+  idempotencyKey String @map("idempotency_key")
+
+  /// Lease held by the worker currently sending this row. A claim only
+  /// succeeds against a free row or an expired lease, so two workers can never
+  /// both believe they own it.
+  lockedBy String?   @map("locked_by")
+  lockedAt DateTime? @map("locked_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  emailJob EmailJob @relation(fields: [emailJobId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// The idempotency guarantee itself.
+  @@unique([idempotencyKey])
+  /// An address appears at most once per campaign.
+  @@unique([emailJobId, email])
+  /// "Scheduled emails by user" and "sent emails by user".
+  @@index([userId, status, scheduledAt])
+  @@index([userId, sentAt])
+  /// The worker's due-work sweep.
+  @@index([status, scheduledAt])
+  /// Finding leases that outlived their worker.
+  @@index([status, lockedAt])
+  /// Progress and detail views for one campaign.
+  @@index([emailJobId, status])
+  /// Cross-campaign lookup: "did we ever contact this address?"
+  @@index([email])
+  @@map("email_recipients")
+}
+
+// ---------------------------------------------------------------------------
+// Integrations
+// ---------------------------------------------------------------------------
+
+model SlackConnection {
+  id     String @id @default(cuid())
+  userId String @map("user_id")
+
+  /// Slack workspace identity.
+  teamId       String  @map("team_id")
+  teamName     String  @map("team_name")
+  teamDomain   String? @map("team_domain")
+  botUserId    String? @map("bot_user_id")
+  authedUserId String? @map("authed_user_id")
+  /// Default channel for campaign notifications.
+  channelId   String? @map("channel_id")
+  channelName String? @map("channel_name")
+
+  /// AES-256-GCM encrypted at rest — never a plaintext token.
+  accessToken String    @map("access_token_encrypted")
+  /// Incoming-webhook URL, also encrypted. Preferred delivery path.
+  webhookUrl  String?   @map("webhook_url_encrypted")
+  tokenType   String    @default("bot") @map("token_type")
+  scope       String?
+  expiresAt   DateTime? @map("expires_at")
+
+  status      SlackConnectionStatus @default(ACTIVE)
+  connectedAt DateTime              @default(now()) @map("connected_at")
+  revokedAt   DateTime?             @map("revoked_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// One connection per workspace per user; reconnecting updates in place.
+  @@unique([userId, teamId])
+  @@index([userId, status])
+  @@index([teamId])
+  @@map("slack_connections")
+}
