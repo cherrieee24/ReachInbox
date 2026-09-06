@@ -1,5 +1,12 @@
 # ReachInbox Email Scheduler
 
+**Live demo: https://reachinbox-3qcm.onrender.com**
+
+> Hosted on Render's free tier, which spins the instance down when idle — the
+> first request can take **50 seconds or more** while it wakes. Subsequent
+> requests are fast. Mail goes to Ethereal, a capture-only sandbox, so nothing
+> is ever delivered to a real inbox.
+
 Schedule an email campaign to a list of recipients, have it delivered reliably
 at the right time and at a controlled pace, and see exactly what happened.
 
