@@ -74,6 +74,23 @@ after(async () => {
   await disconnectDatabase();
 });
 
+/**
+ * Job ids for one campaign, across the states a pending job can occupy.
+ *
+ * Queue-wide counters (`getJobCounts`) cannot express "this campaign gained no
+ * duplicates": the suite files run as parallel processes against one Redis, so
+ * another suite enqueueing or promoting a job between two reads moves the
+ * total for reasons that have nothing to do with the assertion.
+ */
+async function queuedIdsFor(emailJobId: string): Promise<string[]> {
+  const queue = getEmailQueue();
+  const jobs = [...(await queue.getDelayed()), ...(await queue.getWaiting())];
+  return jobs
+    .filter((job) => job.data.emailJobId === emailJobId)
+    .map((job) => String(job.id))
+    .sort();
+}
+
 describe('Scenario 1 — restart recovery', () => {
   it('keeps every future email scheduled across a queue restart', async () => {
     const job = await scheduleEmails(userId, {
@@ -100,14 +117,10 @@ describe('Scenario 1 — restart recovery', () => {
     assert.equal(mine.length, 10, 'delayed jobs survive in Redis');
 
     // Boot-time reconciliation must not duplicate anything.
-    const countsBefore = await queue.getJobCounts('delayed');
+    const idsBefore = await queuedIdsFor(job.id);
     await recoverPendingSends();
-    const countsAfter = await queue.getJobCounts('delayed');
-    assert.equal(
-      countsAfter.delayed,
-      countsBefore.delayed,
-      'recovery is idempotent — no duplicate jobs',
-    );
+    const idsAfter = await queuedIdsFor(job.id);
+    assert.deepEqual(idsAfter, idsBefore, 'recovery is idempotent — no duplicate jobs');
 
     const after = await prisma.emailRecipient.count({
       where: { emailJobId: job.id, status: 'SCHEDULED' },
@@ -611,14 +624,13 @@ describe('Queue persistence', () => {
       idempotencyKey: row.idempotencyKey,
     };
 
-    const queue = getEmailQueue();
-    const before = await queue.getJobCounts('delayed', 'waiting');
+    const before = await queuedIdsFor(job.id);
     for (let i = 0; i < 5; i += 1) await enqueueSends([send]);
-    const after = await queue.getJobCounts('delayed', 'waiting');
+    const after = await queuedIdsFor(job.id);
 
-    assert.equal(
-      after.delayed + after.waiting,
-      before.delayed + before.waiting,
+    assert.deepEqual(
+      after,
+      before,
       'the job id is the idempotency key, so duplicates are rejected by Redis',
     );
   });

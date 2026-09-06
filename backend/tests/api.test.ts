@@ -12,6 +12,12 @@ import { cleanupBySubject, futureIso, setupContext, tag, tagPrefix, type TestCon
 
 /** HTTP-level tests over the real middleware stack, router and database. */
 
+// The OAuth-start test only checks the redirect this server builds — it never
+// contacts Google — so placeholders are enough, and they keep the suite
+// runnable on a machine (or a CI runner) with no real credentials configured.
+process.env.GOOGLE_CLIENT_ID ||= 'test-google-client-id';
+process.env.GOOGLE_CLIENT_SECRET ||= 'test-google-client-secret';
+
 const app = createApp();
 const SUBJECT = tag('api');
 let ctx: TestContext;
