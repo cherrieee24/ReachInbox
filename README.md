@@ -579,6 +579,10 @@ note that a second account's email is unreachable from this session.
   never affects a send.
 - **Sending pace is per sender, not per domain or per recipient.** Nothing
   models per-recipient reputation or ISP-specific backoff.
+- **Each user gets one sender, created on first sign-in.** The schema, the
+  per-sender throttle and the API's optional `senderId` all support several
+  per user, but there is no UI for managing them — additional senders are
+  added directly in the database.
 - **Recovery runs at boot, not continuously.** BullMQ's own stalled-job
   detection covers the running case; a periodic sweeper would be the natural
   next step, and it would still not be cron.

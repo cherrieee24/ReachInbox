@@ -52,7 +52,44 @@ export async function findOrCreateUserFromGoogle(profile: GoogleProfile): Promis
     },
   });
 
+  // A campaign cannot be scheduled without a sender, and there is no UI for
+  // creating one, so every user gets a default on sign-in. Without this a fresh
+  // deployment is unusable: the first Compose fails with "No sender configured".
+  await ensureDefaultSender(user.id, user.name, user.email);
+
   return toPublicUser(user);
+}
+
+/**
+ * Gives a user a default From address the first time they sign in.
+ *
+ * Ethereal ignores the From header — it captures everything regardless — so the
+ * user's own address is the most recognisable choice, and it makes the Sent
+ * table read sensibly. Additional senders can be added directly in the
+ * database; the schema, the API's optional `senderId` and the per-sender
+ * throttle all support several per user.
+ */
+async function ensureDefaultSender(userId: string, name: string, email: string): Promise<void> {
+  const existing = await prisma.sender.findFirst({ where: { userId } });
+  if (existing) return;
+
+  try {
+    await prisma.sender.create({
+      data: {
+        userId,
+        name,
+        fromEmail: email,
+        provider: 'ETHEREAL',
+        isDefault: true,
+        isVerified: true,
+        verifiedAt: new Date(),
+      },
+    });
+  } catch (error) {
+    // Two tabs completing sign-in at once both pass the check above; the unique
+    // constraint settles it and the loser has nothing left to do.
+    if ((error as { code?: unknown }).code !== 'P2002') throw error;
+  }
 }
 
 export async function findUserById(id: string): Promise<PublicUser | null> {
